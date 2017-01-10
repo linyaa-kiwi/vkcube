@@ -112,10 +112,13 @@ xstrdup(const char *s)
    return dup;
 }
 
-static void
+/* Return -1 on failure. */
+static int
 init_vk(struct vkcube *vc, const char *extension)
 {
-   vkCreateInstance(&(VkInstanceCreateInfo) {
+   VkResult r;
+
+   r = vkCreateInstance(&(VkInstanceCreateInfo) {
          .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
          .pApplicationInfo = &(VkApplicationInfo) {
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -130,11 +133,18 @@ init_vk(struct vkcube *vc, const char *extension)
       },
       NULL,
       &vc->instance);
+   if (r != VK_SUCCESS)
+      return -1;
 
    uint32_t count;
-   vkEnumeratePhysicalDevices(vc->instance, &count, NULL);
+   r = vkEnumeratePhysicalDevices(vc->instance, &count, NULL);
+   if (r != VK_SUCCESS)
+      return -1;
+
    VkPhysicalDevice pd[count];
-   vkEnumeratePhysicalDevices(vc->instance, &count, pd);
+   r = vkEnumeratePhysicalDevices(vc->instance, &count, pd);
+   if (r != VK_SUCCESS)
+      return -1;
    vc->physical_device = pd[0];
    printf("%d physical devices\n", count);
 
@@ -149,7 +159,7 @@ init_vk(struct vkcube *vc, const char *extension)
    vkGetPhysicalDeviceQueueFamilyProperties(vc->physical_device, &count, props);
    assert(props[0].queueFlags & VK_QUEUE_GRAPHICS_BIT);
 
-   vkCreateDevice(vc->physical_device,
+   r = vkCreateDevice(vc->physical_device,
                   &(VkDeviceCreateInfo) {
                      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                      .queueCreateInfoCount = 1,
@@ -166,8 +176,12 @@ init_vk(struct vkcube *vc, const char *extension)
                   },
                   NULL,
                   &vc->device);
+   if (r != VK_SUCCESS)
+      return -1;
 
    vkGetDeviceQueue(vc->device, 0, 0, &vc->queue);
+
+   return 0;
 }
 
 static void
@@ -354,7 +368,11 @@ write_buffer(struct vkcube *vc, struct vkcube_buffer *b)
 static int
 init_headless(struct vkcube *vc)
 {
-   init_vk(vc, NULL);
+   if (init_vk(vc, NULL) == -1) {
+      fprintf(stderr, "failed to initialize Vulkan for headless mode\n");
+      return -1;
+   }
+
    vc->image_format = VK_FORMAT_B8G8R8A8_SRGB;
    init_vk_objects(vc);
 
@@ -508,7 +526,11 @@ init_kms(struct vkcube *vc)
 
    vc->gbm_device = gbm_create_device(vc->fd);
 
-   init_vk(vc, NULL);
+   if (init_vk(vc, NULL) == -1) {
+      fprintf(stderr, "failed to initialize Vulkan for KMS\n");
+      return -1;
+   }
+
    vc->image_format = VK_FORMAT_R8G8B8A8_SRGB;
    init_vk_objects(vc);
 
@@ -784,7 +806,10 @@ init_xcb(struct vkcube *vc)
 
    xcb_flush(vc->xcb.conn);
 
-   init_vk(vc, VK_KHR_XCB_SURFACE_EXTENSION_NAME);
+   if (init_vk(vc, VK_KHR_XCB_SURFACE_EXTENSION_NAME) == -1) {
+      fprintf(stderr, "failed to initialize Vulkan for XCB\n");
+      return -1;
+   }
 
    if (!vkGetPhysicalDeviceXcbPresentationSupportKHR(vc->physical_device, 0,
                                                      vc->xcb.conn,
@@ -1092,7 +1117,10 @@ init_wayland(struct vkcube *vc)
    vc->wl.wait_for_configure = true;
    wl_surface_commit(vc->wl.surface);
 
-   init_vk(vc, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+   if (init_vk(vc, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == -1) {
+      fprintf(stderr, "failed to initialize Vulkan for Wayland\n");
+      return -1;
+   }
 
    PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR get_wayland_presentation_support =
       (PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR)
