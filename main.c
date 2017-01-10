@@ -114,7 +114,9 @@ xstrdup(const char *s)
 
 /* Return -1 on failure. */
 static int
-init_vk(struct vkcube *vc, const char *extension)
+init_vk(struct vkcube *vc,
+        const char *instance_exts[], size_t instance_ext_count,
+        const char *device_exts[], size_t device_ext_count)
 {
    VkResult r;
 
@@ -125,11 +127,8 @@ init_vk(struct vkcube *vc, const char *extension)
             .pApplicationName = "vkcube",
             .apiVersion = VK_MAKE_VERSION(1, 0, 2),
          },
-         .enabledExtensionCount = extension ? 2 : 0,
-         .ppEnabledExtensionNames = (const char *[2]) {
-            VK_KHR_SURFACE_EXTENSION_NAME,
-            extension,
-         },
+         .enabledExtensionCount = instance_ext_count,
+         .ppEnabledExtensionNames = instance_exts,
       },
       NULL,
       &vc->instance);
@@ -169,10 +168,8 @@ init_vk(struct vkcube *vc, const char *extension)
                         .queueCount = 1,
                         .pQueuePriorities = (float []) { 1.0f },
                      },
-                     .enabledExtensionCount = 1,
-                     .ppEnabledExtensionNames = (const char * const []) {
-                        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                     },
+                     .enabledExtensionCount = device_ext_count,
+                     .ppEnabledExtensionNames = device_exts,
                   },
                   NULL,
                   &vc->device);
@@ -368,7 +365,7 @@ write_buffer(struct vkcube *vc, struct vkcube_buffer *b)
 static int
 init_headless(struct vkcube *vc)
 {
-   if (init_vk(vc, NULL) == -1) {
+   if (init_vk(vc, NULL, 0, NULL, 0)) {
       fprintf(stderr, "failed to initialize Vulkan for headless mode\n");
       return -1;
    }
@@ -526,7 +523,7 @@ init_kms(struct vkcube *vc)
 
    vc->gbm_device = gbm_create_device(vc->fd);
 
-   if (init_vk(vc, NULL) == -1) {
+   if (init_vk(vc, NULL, 0, NULL, 0) == -1) {
       fprintf(stderr, "failed to initialize Vulkan for KMS\n");
       return -1;
    }
@@ -806,7 +803,17 @@ init_xcb(struct vkcube *vc)
 
    xcb_flush(vc->xcb.conn);
 
-   if (init_vk(vc, VK_KHR_XCB_SURFACE_EXTENSION_NAME) == -1) {
+   const char *instance_exts[] = {
+      VK_KHR_SURFACE_EXTENSION_NAME,
+      VK_KHR_XCB_SURFACE_EXTENSION_NAME,
+   };
+
+   const char *device_exts[] = {
+      VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+   };
+
+   if (init_vk(vc, instance_exts, ARRAY_LEN(instance_exts),
+               device_exts, ARRAY_LEN(device_exts)) == -1) {
       fprintf(stderr, "failed to initialize Vulkan for XCB\n");
       return -1;
    }
@@ -1117,7 +1124,17 @@ init_wayland(struct vkcube *vc)
    vc->wl.wait_for_configure = true;
    wl_surface_commit(vc->wl.surface);
 
-   if (init_vk(vc, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == -1) {
+   const char *instance_exts[] = {
+      VK_KHR_SURFACE_EXTENSION_NAME,
+      VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+   };
+
+   const char *device_exts[] = {
+      VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+   };
+
+   if (init_vk(vc, instance_exts, ARRAY_LEN(instance_exts),
+               device_exts, ARRAY_LEN(device_exts)) == -1) {
       fprintf(stderr, "failed to initialize Vulkan for Wayland\n");
       return -1;
    }
