@@ -6,6 +6,7 @@ common_CFLAGS = -Wall -O0 -g3
 
 CFLAGS = -std=c11				\
 	 $(common_CFLAGS)			\
+	-Werror=incompatible-pointer-types	\
 	-Werror=implicit-function-declaration	\
 	-Werror=missing-prototypes
 
