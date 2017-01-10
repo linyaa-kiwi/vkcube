@@ -26,6 +26,7 @@
 
 #define printflike(a, b) __attribute__((format(printf, (a), (b))))
 
+#define ARRAY_LEN(a) (sizeof(a) / sizeof(*(a)))
 #define MAX_NUM_IMAGES 4
 
 struct vkcube_buffer {
