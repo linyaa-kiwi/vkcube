@@ -111,3 +111,15 @@ streq(const char *a, const char *b)
 {
    return strcmp(a, b) == 0;
 }
+
+#define GET_VK_INSTANCE_FUNC(name) \
+   PFN_##name name = (PFN_##name) vkGetInstanceProcAddr(vc->instance, #name); \
+   if (!name) { \
+      fail("failed to get function " #name); \
+   }
+
+#define GET_VK_DEVICE_FUNC(name) \
+   PFN_##name name = (PFN_##name) vkGetDeviceProcAddr(vc->device, #name); \
+   if (!name) { \
+      fail("failed to get function " #name); \
+   }

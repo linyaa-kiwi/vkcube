@@ -531,8 +531,7 @@ init_kms(struct vkcube *vc)
    vc->image_format = VK_FORMAT_R8G8B8A8_SRGB;
    init_vk_objects(vc);
 
-   PFN_vkCreateDmaBufImageINTEL create_dma_buf_image =
-      (PFN_vkCreateDmaBufImageINTEL)vkGetDeviceProcAddr(vc->device, "vkCreateDmaBufImageINTEL");
+   GET_VK_DEVICE_FUNC(vkCreateDmaBufImageINTEL);
 
    for (uint32_t i = 0; i < 2; i++) {
       struct vkcube_buffer *b = &vc->buffers[i];
@@ -543,7 +542,7 @@ init_kms(struct vkcube *vc)
 
       fd = gbm_bo_get_fd(b->gbm_bo);
       stride = gbm_bo_get_stride(b->gbm_bo);
-      create_dma_buf_image(vc->device,
+      vkCreateDmaBufImageINTEL(vc->device,
                            &(VkDmaBufImageCreateInfo) {
                               .sType = VK_STRUCTURE_TYPE_DMA_BUF_IMAGE_CREATE_INFO_INTEL,
                               .fd = fd,
@@ -1139,20 +1138,16 @@ init_wayland(struct vkcube *vc)
       return -1;
    }
 
-   PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR get_wayland_presentation_support =
-      (PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR)
-      vkGetInstanceProcAddr(vc->instance, "vkGetPhysicalDeviceWaylandPresentationSupportKHR");
-   PFN_vkCreateWaylandSurfaceKHR create_wayland_surface =
-      (PFN_vkCreateWaylandSurfaceKHR)
-      vkGetInstanceProcAddr(vc->instance, "vkCreateWaylandSurfaceKHR");
+   GET_VK_INSTANCE_FUNC(vkGetPhysicalDeviceWaylandPresentationSupportKHR);
+   GET_VK_INSTANCE_FUNC(vkCreateWaylandSurfaceKHR);
 
-   if (!get_wayland_presentation_support(vc->physical_device, 0,
-                                         vc->wl.display)) {
+   if (!vkGetPhysicalDeviceWaylandPresentationSupportKHR(
+               vc->physical_device, 0, vc->wl.display)) {
       fail("Vulkan not supported on given Wayland surface");
    }
 
-   create_wayland_surface(vc->instance,
-                          &(VkWaylandSurfaceCreateInfoKHR) {
+   vkCreateWaylandSurfaceKHR(vc->instance,
+      &(VkWaylandSurfaceCreateInfoKHR) {
          .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
          .display = vc->wl.display,
          .surface = vc->wl.surface,
