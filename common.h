@@ -18,7 +18,6 @@
 #define VK_USE_PLATFORM_WAYLAND_KHR
 #define VK_PROTOTYPES
 #include <vulkan/vulkan.h>
-#include <vulkan/vulkan_intel.h>
 
 #include <gbm.h>
 

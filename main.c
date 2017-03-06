@@ -112,6 +112,16 @@ xstrdup(const char *s)
    return dup;
 }
 
+/* Return -1 on failure */
+static off_t
+fd_get_size(int fd)
+{
+   if (lseek(fd, 0, SEEK_SET) == -1)
+      return -1;
+
+   return lseek(fd, 0, SEEK_END);
+}
+
 /* Return -1 on failure. */
 static int
 init_vk(struct vkcube *vc,
@@ -485,6 +495,7 @@ init_vt(struct vkcube *vc)
 static int
 init_kms(struct vkcube *vc)
 {
+   VkResult r;
    drmModeRes *resources;
    drmModeConnector *connector;
    drmModeEncoder *encoder;
@@ -523,41 +534,239 @@ init_kms(struct vkcube *vc)
 
    vc->gbm_device = gbm_create_device(vc->fd);
 
-   if (init_vk(vc, NULL, 0, NULL, 0) == -1) {
+   const char *instance_exts[] = {
+      VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+      VK_KHX_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+   };
+
+   const char *device_exts[] = {
+      VK_KHX_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+      VK_MESAX_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+      VK_MESAX_EXTERNAL_IMAGE_DMA_BUF_EXTENSION_NAME,
+   };
+
+   if (init_vk(vc, instance_exts, ARRAY_LEN(instance_exts),
+               device_exts, ARRAY_LEN(device_exts)) == -1) {
       fprintf(stderr, "failed to initialize Vulkan for KMS\n");
       return -1;
    }
 
-   vc->image_format = VK_FORMAT_R8G8B8A8_SRGB;
+   uint32_t gbm_format = GBM_FORMAT_XRGB8888; /* FIXME: looks wrong */
+   vc->image_format = VK_FORMAT_R8G8B8A8_UNORM;
+
    init_vk_objects(vc);
 
-   GET_VK_DEVICE_FUNC(vkCreateDmaBufImageINTEL);
+   GET_VK_INSTANCE_FUNC(vkGetPhysicalDeviceProperties2KHR);
+   GET_VK_INSTANCE_FUNC(vkGetPhysicalDeviceImageFormatProperties2KHR);
+   GET_VK_INSTANCE_FUNC(vkGetPhysicalDeviceMemoryProperties2KHR);
+   GET_VK_DEVICE_FUNC(vkGetMemoryFdPropertiesKHX);
+
+   VkDmaBufImageFormatModifierPropertiesMESAX dma_buf_image_format_mod_props[8];
+
+   VkDmaBufImageFormatPropertiesMESAX dma_buf_image_format_props = {
+       .sType = VK_STRUCTURE_TYPE_DMA_BUF_IMAGE_FORMAT_PROPERTIES_MESAX,
+       .modifierCount = ARRAY_LEN(dma_buf_image_format_mod_props),
+       .pModifierProperties = dma_buf_image_format_mod_props,
+   };
+
+   VkExternalImageFormatPropertiesKHX ext_image_format_props = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES_KHX,
+      .pNext = &dma_buf_image_format_props,
+      .externalMemoryProperties = { 0 },
+   };
+
+   VkImageFormatProperties2KHR image_format_props = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2_KHR,
+      .pNext = &ext_image_format_props,
+   };
+
+   r = vkGetPhysicalDeviceImageFormatProperties2KHR(vc->physical_device,
+            &(VkPhysicalDeviceImageFormatInfo2KHR) {
+               .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2_KHR,
+               .format = vc->image_format,
+               .type = VK_IMAGE_TYPE_2D,
+               .tiling = VK_IMAGE_TILING_OPTIMAL,
+               .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+               .flags = 0,
+               .pNext = &(VkPhysicalDeviceExternalImageFormatInfoKHX) {
+                  .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO_KHX,
+                  .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_MESAX,
+               },
+            },
+            &image_format_props);
+   if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+      fprintf(stderr, "vkGetPhysicalDeviceImageFormatProperties2KHR failed\n");
+      return -1;
+   }
+
+   if (!(ext_image_format_props.externalMemoryProperties.externalMemoryFeatures &
+         VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT_KHX)) {
+      fprintf(stderr, "VkExternalMemoryFeatureFlagsKHX lacks importable bit\n");
+      return -1;
+   }
+
+   /* Choose a format modifier */
+   const VkDmaBufImageFormatModifierPropertiesMESAX *chosen_props = NULL;
+   for (uint32_t i = 0; i < dma_buf_image_format_props.modifierCount; ++i) {
+       /* HACK: Without the existence of gbm_bo_create_with_modifiers(), we
+        * must magically know which DRM format modifier that gbm_bo_create()
+        * will choose.
+        */
+       if (dma_buf_image_format_props.pModifierProperties[i].drmFormatModifier == I915_FORMAT_MOD_X_TILED) {
+           chosen_props = &dma_buf_image_format_props.pModifierProperties[i];
+           break;
+       }
+   }
+
+   if (!chosen_props) {
+      fprintf(stderr, "VkDmaBufImageFormatPropertiesMESAX returned no suitable "
+                      "DRM format modifier\n");
+      return -1;
+   }
+
+   if (vc->width > chosen_props->imageFormatProperties.maxExtent.width ||
+       vc->height > chosen_props->imageFormatProperties.maxExtent.height) {
+      fprintf(stderr, "crtc size exceeds VkImageFormatProperties::maxExtent\n");
+      return -1;
+   }
 
    for (uint32_t i = 0; i < 2; i++) {
       struct vkcube_buffer *b = &vc->buffers[i];
-      int fd, stride, ret;
+      int fd, ret;
 
       b->gbm_bo = gbm_bo_create(vc->gbm_device, vc->width, vc->height,
-                                GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+                                gbm_format, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+      if (!b->gbm_bo) {
+         fprintf(stderr, "gbm_bo_create failed\n");
+         return -1;
+      }
 
       fd = gbm_bo_get_fd(b->gbm_bo);
-      stride = gbm_bo_get_stride(b->gbm_bo);
-      vkCreateDmaBufImageINTEL(vc->device,
-                           &(VkDmaBufImageCreateInfo) {
-                              .sType = VK_STRUCTURE_TYPE_DMA_BUF_IMAGE_CREATE_INFO_INTEL,
-                              .fd = fd,
-                              .format = vc->image_format,
-                              .extent = { vc->width, vc->height, 1 },
-                              .strideInBytes = stride
-                           },
-                           NULL,
-                           &b->mem,
-                           &b->image);
-      close(fd);
+      if (fd == -1) {
+         fprintf(stderr, "gbm_bo_get_fd failed\n");
+         return -1;
+      }
 
       b->stride = gbm_bo_get_stride(b->gbm_bo);
+      if (chosen_props->maxRowPitch != 0 &&
+          b->stride > chosen_props->maxRowPitch) {
+          fprintf(stderr, "gbm bo stride is too large for Vulkan\n");
+          return -1;
+      }
+      if (chosen_props->rowPitchAlignment != 0 &&
+          b->stride % chosen_props->rowPitchAlignment != 0) {
+          fprintf(stderr, "gbm bo stride is not aligned for Vulkan\n");
+          return -1;
+      }
+
+      VkMemoryFdPropertiesKHX mem_fd_props = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHX,
+         .memoryTypeBits = 0,
+      };
+
+      r = vkGetMemoryFdPropertiesKHX(vc->device,
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_MESAX, fd,
+            &mem_fd_props);
+      if (r != VK_SUCCESS) {
+         fprintf(stderr, "vkGetMemoryFdPropertiesKHX failed on dma_buf\n");
+         return -1;
+      }
+
+      if (mem_fd_props.memoryTypeBits == 0) {
+         fprintf(stderr, "dma_buf maps to no VkMemoryType\n");
+         return -1;
+      }
+
+      /* Choose first memory type */
+      uint32_t mem_type_index = ffs(mem_fd_props.memoryTypeBits) - 1;
+
+      off_t fd_size = fd_get_size(fd);
+      if (fd_size == -1) {
+         fprintf(stderr, "failed to get size of dma_buf\n");
+         return -1;
+      }
+      if (fd_size == 0) {
+         fprintf(stderr, "dma_buf has no size\n");
+         return -1;
+      }
+
+      r = vkAllocateMemory(vc->device,
+            &(VkMemoryAllocateInfo) {
+               .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+               .allocationSize = fd_size,
+               .memoryTypeIndex = mem_type_index,
+               .pNext = &(VkImportMemoryFdInfoKHX) {
+                  .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHX,
+                  .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_MESAX,
+                  .fd = fd,
+               },
+            },
+            /*pAllocator*/ NULL,
+            &b->mem);
+      if (r != VK_SUCCESS) {
+         fprintf(stderr, "vkAllocateMemory failed to import dma_buf\n");
+         return -1;
+      }
+
+      r = vkCreateImage(vc->device,
+            &(VkImageCreateInfo) {
+               .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+               .flags = 0,
+               .imageType = VK_IMAGE_TYPE_2D,
+               .format = vc->image_format,
+               .extent = { vc->width, vc->height, 1 },
+               .mipLevels = 1,
+               .arrayLayers = 1,
+               .samples = VK_SAMPLE_COUNT_1_BIT,
+               .tiling = VK_IMAGE_TILING_OPTIMAL,
+               .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+               .queueFamilyIndexCount = 1,
+               .pQueueFamilyIndices = (uint32_t[]) { 0 },
+               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+               .pNext = &(VkExternalMemoryImageCreateInfoKHX) {
+                  .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHX,
+                  .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_MESAX,
+               .pNext = &(VkImportImageDmaBufInfoMESAX) {
+                  .sType = VK_STRUCTURE_TYPE_IMPORT_IMAGE_DMA_BUF_INFO_MESAX,
+                  .drmFormatModifier = chosen_props->drmFormatModifier,
+                  .planeCount = 1,
+                  .pPlanes = (VkImportImageDmaBufPlaneInfoMESAX[]) {
+                     {
+                        .offset = 0,
+                        .size = fd_size,
+                        .rowPitch = b->stride,
+                     },
+                   },
+            }}},
+            /*pAllocator*/ 0,
+            &b->image);
+      if (r != VK_SUCCESS) {
+         fprintf(stderr, "vkCreateImage failed for dma_buf\n");
+         return -1;
+      }
+
+      VkMemoryRequirements mem_reqs;
+      vkGetImageMemoryRequirements(vc->device, b->image, &mem_reqs);
+      if (mem_reqs.size > fd_size) {
+         fprintf(stderr, "VkImage requires memory larger than dma_buf\n");
+         return -1;
+      }
+      if (!(mem_reqs.memoryTypeBits & (1 << mem_type_index))) {
+         fprintf(stderr, "VkImage and dma_buf have incompatible VkMemoryTypes\n");
+         return -1;
+      }
+
+      r = vkBindImageMemory(vc->device, b->image, b->mem, /*offset*/ 0);
+      if (r != VK_SUCCESS) {
+         fprintf(stderr, "vkBindImageMemory failed on dma_buf\n");
+         return -1;
+      }
+
+      close(fd);
+
       uint32_t bo_handles[4] = { gbm_bo_get_handle(b->gbm_bo).s32, };
-      uint32_t pitches[4] = { stride, };
+      uint32_t pitches[4] = { b->stride, };
       uint32_t offsets[4] = { 0, };
       ret = drmModeAddFB2(vc->fd, vc->width, vc->height,
                           DRM_FORMAT_XRGB8888, bo_handles,
