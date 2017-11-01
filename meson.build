@@ -51,4 +51,5 @@ vkcube = executable(
             '-Werror=implicit-function-declaration',
 	    '-Werror=missing-prototypes'],
   dependencies : [libm, dep_libdrm, dep_gbm, dep_libpng, dep_wayland, dep_xcb, dep_vulkan],
+  install: true,
 )
