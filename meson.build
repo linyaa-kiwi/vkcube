@@ -14,6 +14,8 @@ if cc.has_header('vulkan/vulkan_intel.h')
   defs += '-DHAVE_VULKAN_INTEL_H'
 endif
 
+libm = cc.find_library('m', required : true)
+
 # See https://github.com/google/shaderc
 prog_glslc = find_program('glslc', required : false)
 prog_cp = find_program('cp')
@@ -48,5 +50,5 @@ vkcube = executable(
   c_args : [ defs, '-Wall',
             '-Werror=implicit-function-declaration',
 	    '-Werror=missing-prototypes'],
-  dependencies : [dep_libdrm, dep_gbm, dep_libpng, dep_wayland, dep_xcb, dep_vulkan],
+  dependencies : [libm, dep_libdrm, dep_gbm, dep_libpng, dep_wayland, dep_xcb, dep_vulkan],
 )
