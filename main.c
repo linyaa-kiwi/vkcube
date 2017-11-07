@@ -67,6 +67,27 @@ enum display_mode {
    DISPLAY_MODE_XCB,
 };
 
+struct drm_format_mod_set {
+   size_t len;
+
+   /* Invalid entries are equal to
+    * { DRM_FORMAT_MOD_INVALID, VK_FORMAT_UNDEFINED }.
+    */
+   struct {
+      uint64_t drm_format_mod;
+      VkFormat vk_format;
+   } info[];
+};
+
+#define GET_VK_PROC(name) ({ \
+   my##name = (PFN_vk##name) vkGetDeviceProcAddr(vc->device, "vk" #name); \
+})
+
+static PFN_vkGetPhysicalDeviceFormatProperties2KHR myGetPhysicalDeviceFormatProperties2KHR = NULL;
+static PFN_vkGetPhysicalDeviceImageFormatProperties2KHR myGetPhysicalDeviceImageFormatProperties2KHR = NULL;
+static PFN_vkGetMemoryFdKHR myGetMemoryFdKHR = NULL;
+static PFN_vkGetImageDrmFormatModifierEXT myGetImageDrmFormatModifierEXT = NULL;
+
 static enum display_mode display_mode = DISPLAY_MODE_AUTO;
 static const char *arg_out_file = "./cube.png";
 
@@ -101,16 +122,128 @@ fail_if(int cond, const char *format, ...)
    va_end(args);
 }
 
+static void noreturn
+oom(void)
+{
+   fprintf(stderr, "out of memory\n");
+   abort();
+}
+
+static inline void * __attribute__((returns_nonnull))
+xmalloc(size_t n)
+{
+   void *p = malloc(n);
+   if (!p)
+      oom();
+   return p;
+}
+
+static inline void * __attribute__((returns_nonnull))
+xcalloc(size_t m, size_t n)
+{
+   void *p = calloc(m, n);
+   if (!p)
+      oom();
+   return p;
+}
+
 static char * __attribute__((returns_nonnull))
 xstrdup(const char *s)
 {
    char *dup = strdup(s);
-   if (!dup) {
-      fprintf(stderr, "out of memory\n");
-      abort();
+   if (!dup)
+      oom();
+   return dup;
+}
+
+static int
+do_ioctl(int fd, unsigned long request, void *arg)
+{
+   int ret;
+
+   do {
+      ret = ioctl(fd, request, arg);
+   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+
+   return ret;
+}
+
+static uint32_t
+prime_fd_to_handle(int drm_fd, int prime_fd)
+{
+   struct drm_prime_handle args = {
+      .fd = prime_fd,
+   };
+
+   int ret = do_ioctl(drm_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &args);
+   if (ret == -1)
+      return 0;
+
+   return args.handle;
+}
+
+static void
+drm_format_mod_set_reject(struct drm_format_mod_set *f, size_t i)
+{
+      f->info[i].vk_format = VK_FORMAT_UNDEFINED;
+      f->info[i].drm_format_mod = DRM_FORMAT_MOD_INVALID;
+}
+
+static struct drm_format_mod_set *
+drm_format_mod_set_new(size_t len)
+{
+   struct drm_format_mod_set *f;
+   size_t size;
+
+   if (__builtin_mul_overflow(len, sizeof(f->info[0]), &size))
+      oom();
+
+   if (__builtin_add_overflow(sizeof(*f), size, &size))
+      oom();
+
+   f = xmalloc(size);
+   f->len = len;
+
+   for (size_t i = 0; i < len; ++i) {
+      drm_format_mod_set_reject(f, i);
    }
 
-   return dup;
+   return f;
+}
+
+static void
+drm_format_mod_set_to_vk_image_drm_format_modifier_list_create_info_ext(
+      struct drm_format_mod_set *set,
+      VkFormat vk_format,
+      VkImageDrmFormatModifierListCreateInfoEXT *restrict vk_mod_list)
+{
+   uint32_t count = 0;
+
+   for (uint32_t i = 0; i < set->len; ++i) {
+      if (set->info[i].vk_format != vk_format)
+         continue;
+
+      if (set->info[i].drm_format_mod == DRM_FORMAT_MOD_INVALID)
+         continue;
+
+      ++count;
+   }
+
+   uint64_t *mods = xcalloc(sizeof(uint64_t), vk_mod_list->drmFormatModifierCount);
+
+   for (uint32_t i = 0; i < set->len; ++i) {
+      if (set->info[i].vk_format != vk_format)
+         continue;
+
+      if (set->info[i].drm_format_mod == DRM_FORMAT_MOD_INVALID)
+         continue;
+
+      mods[count++] = set->info[i].drm_format_mod;
+   }
+
+   vk_mod_list->sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
+   vk_mod_list->drmFormatModifierCount = count;
+   vk_mod_list->pDrmFormatModifiers = mods;
 }
 
 static void
@@ -123,8 +256,10 @@ init_vk(struct vkcube *vc, const char *extension)
             .pApplicationName = "vkcube",
             .apiVersion = VK_MAKE_VERSION(1, 0, 2),
          },
-         .enabledExtensionCount = extension ? 2 : 0,
-         .ppEnabledExtensionNames = (const char *[2]) {
+         .enabledExtensionCount = extension ? 4 : 2,
+         .ppEnabledExtensionNames = (const char *[]) {
+            VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+            VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
             VK_KHR_SURFACE_EXTENSION_NAME,
             extension,
          },
@@ -161,13 +296,22 @@ init_vk(struct vkcube *vc, const char *extension)
                         .queueCount = 1,
                         .pQueuePriorities = (float []) { 1.0f },
                      },
-                     .enabledExtensionCount = 1,
+                     .enabledExtensionCount = 5,
                      .ppEnabledExtensionNames = (const char * const []) {
                         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+                        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+                        VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+                        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
                      },
                   },
                   NULL,
                   &vc->device);
+
+   GET_VK_PROC(GetPhysicalDeviceFormatProperties2KHR);
+   GET_VK_PROC(GetPhysicalDeviceImageFormatProperties2KHR);
+   GET_VK_PROC(GetMemoryFdKHR);
+   GET_VK_PROC(GetImageDrmFormatModifierEXT);
 
    vkGetDeviceQueue(vc->device, 0, 0, &vc->queue);
 }
@@ -399,11 +543,7 @@ init_headless(struct vkcube *vc)
    return 0;
 }
 
-#ifdef HAVE_VULKAN_INTEL_H
-
 /* KMS display code - render to kernel modesetting fb */
-
-#include <vulkan/vulkan_intel.h>
 
 static struct termios save_tio;
 
@@ -472,6 +612,130 @@ init_vt(struct vkcube *vc)
    return 0;
 }
 
+/* Return NULL on failure */
+static struct drm_format_mod_set *
+get_vk_drm_format_mods(struct vkcube *vc, VkFormat format)
+{
+   VkResult r;
+
+   VkDrmFormatModifierPropertiesListEXT mod_props_list = {
+      .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+      .drmFormatModifierCount = 0,
+      .pDrmFormatModifierProperties = NULL,
+   };
+
+   VkFormatProperties2KHR format_props = {
+      .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2_KHR,
+      .pNext = &mod_props_list,
+   };
+
+   myGetPhysicalDeviceFormatProperties2KHR(vc->physical_device, format,
+                                           &format_props);
+
+   if (mod_props_list.drmFormatModifierCount == 0) {
+      fprintf(stderr, "no DRM format modifiers supported for VkFormat(%d)\n",
+              format);
+      return NULL;
+   }
+
+   mod_props_list.pDrmFormatModifierProperties =
+      alloca(mod_props_list.drmFormatModifierCount *
+             sizeof(mod_props_list.pDrmFormatModifierProperties[0]));
+
+   myGetPhysicalDeviceFormatProperties2KHR(vc->physical_device, format,
+                                           &format_props);
+
+   for (uint32_t i = 0; i < mod_props_list.drmFormatModifierCount; ++i) {
+      VkDrmFormatModifierPropertiesEXT mod_props =
+         mod_props_list.pDrmFormatModifierProperties[i];
+      fprintf(stderr, "VkFormat(%d):\n", format);
+      fprintf(stderr, "    drmFormatModifier: 0x%016"PRIu64"\n",
+              mod_props.drmFormatModifier);
+      fprintf(stderr, "    drmFormatModifierPlaneCount: %u\n",
+              mod_props.drmFormatModifierPlaneCount);
+      fprintf(stderr, "    drmFormatModifierTilingFeatures: 0x%08"PRIu32"\n",
+              mod_props.drmFormatModifierTilingFeatures);
+   }
+
+   struct drm_format_mod_set *mod_set =
+      drm_format_mod_set_new(mod_props_list.drmFormatModifierCount);
+
+   /* Initialize the filter with all modifiers returned by the Vulkan query. */
+   for (uint32_t i = 0; i < mod_set->len; ++i) {
+      mod_set->info[i].vk_format = format;
+      mod_set->info[i].drm_format_mod =
+         mod_props_list.pDrmFormatModifierProperties[i].drmFormatModifier;
+   }
+
+   for (uint32_t i = 0; i < mod_set->len; ++i) {
+      if (!(mod_props_list.pDrmFormatModifierProperties[i].drmFormatModifierTilingFeatures
+            & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+         drm_format_mod_set_reject(mod_set, i);
+      }
+
+      if (mod_props_list.pDrmFormatModifierProperties[i].drmFormatModifierPlaneCount != 1) {
+         /* FINISHME: Accept multi-plane modifiers */
+         drm_format_mod_set_reject(mod_set, i);
+      }
+   }
+
+   for (uint32_t i = 0; i < mod_set->len; ++i) {
+      if (mod_set->info[i].vk_format == VK_FORMAT_UNDEFINED)
+         continue;
+
+      VkExternalImageFormatPropertiesKHR external_image_format_props = {
+         .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES_KHR,
+         .externalMemoryProperties = { 0 },
+      };
+
+      VkImageFormatProperties2KHR image_format_props = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2_KHR,
+         .pNext = &external_image_format_props,
+      };
+
+      r = myGetPhysicalDeviceImageFormatProperties2KHR(vc->physical_device,
+               &(VkPhysicalDeviceImageFormatInfo2KHR) {
+                  .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2_KHR,
+                  .format = mod_set->info[i].vk_format,
+                  .type = VK_IMAGE_TYPE_2D,
+                  .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+                  .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                  .pNext =
+               &(VkPhysicalDeviceExternalImageFormatInfoKHR) {
+                  .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO_KHR,
+                  .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+                  .pNext =
+               &(VkPhysicalDeviceImageDrmFormatModifierInfoEXT) {
+                  .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+                  .drmFormatModifier = mod_set->info[i].drm_format_mod,
+               }}},
+               &image_format_props);
+      if (r < 0) {
+         drm_format_mod_set_reject(mod_set, i);
+         continue;
+      }
+
+      if (vc->width > image_format_props.imageFormatProperties.maxExtent.width) {
+         drm_format_mod_set_reject(mod_set, i);
+         continue;
+      }
+
+      if (vc->height > image_format_props.imageFormatProperties.maxExtent.height) {
+         drm_format_mod_set_reject(mod_set, i);
+         continue;
+      }
+   }
+
+   /* FINISHME: Don't hardcode X-tiled */
+   for (uint32_t i = 0; i < mod_set->len; ++i) {
+      if (mod_set->info[i].drm_format_mod != I915_FORMAT_MOD_X_TILED) {
+         drm_format_mod_set_reject(mod_set, i);
+      }
+   }
+
+   return mod_set;
+}
+
 // Return -1 on failure.
 static int
 init_kms(struct vkcube *vc)
@@ -479,6 +743,7 @@ init_kms(struct vkcube *vc)
    drmModeRes *resources;
    drmModeConnector *connector;
    drmModeEncoder *encoder;
+   VkResult r;
    int i;
 
    if (init_vt(vc) == -1)
@@ -516,19 +781,95 @@ init_kms(struct vkcube *vc)
 
    init_vk(vc, NULL);
    vc->image_format = VK_FORMAT_R8G8B8A8_SRGB;
-   init_vk_objects(vc);
 
-   PFN_vkCreateDmaBufImageINTEL create_dma_buf_image =
-      (PFN_vkCreateDmaBufImageINTEL)vkGetDeviceProcAddr(vc->device, "vkCreateDmaBufImageINTEL");
+#if defined(VK_EXT_image_drm_format_modifier)
+   uint64_t mod = DRM_FORMAT_MOD_INVALID;
+
+   struct drm_format_mod_set *mod_set =
+      get_vk_drm_format_mods(vc, vc->image_format);
+
+   VkImageDrmFormatModifierListCreateInfoEXT mod_list = {0};
+   drm_format_mod_set_to_vk_image_drm_format_modifier_list_create_info_ext(
+      mod_set, vc->image_format, &mod_list);
+#endif
+
+   init_vk_objects(vc);
 
    for (uint32_t i = 0; i < 2; i++) {
       struct vkcube_buffer *b = &vc->buffers[i];
-      int fd, stride, ret;
+      int fd, gem_handle, offset, stride, ret;
 
+#if defined(VK_EXT_image_drm_format_modifier)
+      r = vkCreateImage(vc->device,
+            &(VkImageCreateInfo) {
+               .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+               .imageType = VK_IMAGE_TYPE_2D,
+               .format = vc->image_format,
+               .extent = { vc->width, vc->height, 1 },
+               .mipLevels = 1,
+               .arrayLayers = 1,
+               .samples = 1,
+               .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+               .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+               .pNext =
+            &(VkExternalMemoryImageCreateInfoKHR) {
+               .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR,
+               .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+               .pNext = &mod_list,
+            }},
+            NULL,
+            &b->image);
+      fail_if(r != VK_SUCCESS, "vkCreateImage failed with "
+              "VkImageDrmFormatModifierListCreateInfoEXT");
+
+      myGetImageDrmFormatModifierEXT(vc->device, b->image, &mod);
+
+      VkMemoryRequirements mem_reqs;
+      vkGetImageMemoryRequirements(vc->device, b->image, &mem_reqs);
+
+      r = vkAllocateMemory(vc->device,
+               &(VkMemoryAllocateInfo) {
+                  .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                  .allocationSize = mem_reqs.size,
+                  .memoryTypeIndex = 0, /* FIXME */
+               },
+               NULL,
+               &b->mem);
+      fail_if(r != VK_SUCCESS, "vkAllocateMemory failed");
+
+      r = vkBindImageMemory(vc->device, b->image, b->mem, /*offset*/ 0);
+      fail_if(r != VK_SUCCESS, "vkBindImageMemory failed");
+
+      r = myGetMemoryFdKHR(vc->device,
+            &(VkMemoryGetFdInfoKHR) {
+               .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+               .memory = b->mem,
+               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+            },
+            &fd);
+      fail_if(r != VK_SUCCESS, "vkGetMemoryFdInfoKHR failed");
+
+      VkSubresourceLayout plane_layout;
+      vkGetImageSubresourceLayout(vc->device, b->image,
+            &(VkImageSubresource) {
+               .aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT_KHR,
+               .mipLevel = 0,
+               .arrayLayer = 0,
+            },
+            &plane_layout);
+
+      offset = plane_layout.offset;
+      stride = plane_layout.rowPitch;
+      gem_handle = prime_fd_to_handle(vc->fd, fd);
+
+#elif defined(VK_INTEL_create_dma_buf_image)
       b->gbm_bo = gbm_bo_create(vc->gbm_device, vc->width, vc->height,
                                 GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
 
       fd = gbm_bo_get_fd(b->gbm_bo);
+      offset = 0;
       stride = gbm_bo_get_stride(b->gbm_bo);
       create_dma_buf_image(vc->device,
                            &(VkDmaBufImageCreateInfo) {
@@ -542,15 +883,30 @@ init_kms(struct vkcube *vc)
                            &b->mem,
                            &b->image);
       close(fd);
-
       b->stride = gbm_bo_get_stride(b->gbm_bo);
-      uint32_t bo_handles[4] = { gbm_bo_get_handle(b->gbm_bo).s32, };
+      gem_handle = gbm_bo_get_handle(b->gbm_bo).s32;
+
+#else
+#  error "no dma-buf Vulkan extension available"
+#endif
+
+      uint32_t gem_handles[4] = { gem_handle, };
       uint32_t pitches[4] = { stride, };
-      uint32_t offsets[4] = { 0, };
-      ret = drmModeAddFB2(vc->fd, vc->width, vc->height,
-                          DRM_FORMAT_XRGB8888, bo_handles,
-                          pitches, offsets, &b->fb, 0);
-      fail_if(ret == -1, "addfb2 failed\n");
+      uint32_t offsets[4] = { offset, };
+      uint64_t modifiers[4] = { mod, };
+
+      if (mod == DRM_FORMAT_MOD_INVALID) {
+         ret = drmModeAddFB2(vc->fd, vc->width, vc->height,
+                             DRM_FORMAT_XRGB8888, gem_handles,
+                             pitches, offsets, &b->fb, 0);
+         fail_if(ret == -1, "addfb2 failed\n");
+      } else {
+         ret = drmModeAddFB2WithModifiers(vc->fd, vc->width, vc->height,
+                                          DRM_FORMAT_XRGB8888, gem_handles,
+                                          pitches, offsets, modifiers, &b->fb,
+                                          DRM_MODE_FB_MODIFIERS);
+         fail_if(ret == -1, "addfb2 failed\n");
+      }
 
       init_buffer(vc, b);
    }
@@ -616,21 +972,6 @@ mainloop_vt(struct vkcube *vc)
       }
    }
 }
-
-#else
-
-static int
-init_kms(struct vkcube *vc)
-{
-   return -1;
-}
-
-static void
-mainloop_vt(struct vkcube *vc)
-{
-}
-
-#endif
 
 /* Swapchain-based code - shared between XCB and Wayland */
 

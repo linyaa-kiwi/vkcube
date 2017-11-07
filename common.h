@@ -28,6 +28,7 @@
 
 #define MAX_NUM_IMAGES 4
 
+
 struct vkcube_buffer {
    struct gbm_bo *gbm_bo;
    VkDeviceMemory mem;
