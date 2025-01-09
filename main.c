@@ -120,17 +120,22 @@ xstrdup(const char *s)
    return dup;
 }
 
-static int find_image_memory(struct vkcube *vc, unsigned allowed)
+static int32_t
+find_image_memory(struct vkcube *vc, uint32_t allowed_memory_types)
 {
-   VkMemoryPropertyFlags flags =
+   VkMemoryPropertyFlags required_props =
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
       (vc->protected ? VK_MEMORY_PROPERTY_PROTECTED_BIT : 0);
 
-    for (unsigned i = 0; (1u << i) <= allowed && i <= vc->memory_properties.memoryTypeCount; ++i) {
-        if ((allowed & (1u << i)) && (vc->memory_properties.memoryTypes[i].propertyFlags & flags))
-            return i;
-    }
-    return -1;
+   for (uint32_t i = 0; i < vc->memory_properties.memoryTypeCount; ++i) {
+      VkMemoryPropertyFlags props = vc->memory_properties.memoryTypes[i].propertyFlags;
+
+      if (((1u << i) & allowed_memory_types) &&
+          (required_props & props) == required_props)
+         return i;
+   }
+
+   return -1;
 }
 
 static void
