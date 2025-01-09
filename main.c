@@ -120,7 +120,7 @@ xstrdup(const char *s)
    return dup;
 }
 
-static int32_t
+int32_t
 choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
                          VkMemoryPropertyFlags required_props)
 {
