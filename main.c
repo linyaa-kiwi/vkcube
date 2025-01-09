@@ -121,12 +121,9 @@ xstrdup(const char *s)
 }
 
 static int32_t
-find_image_memory(struct vkcube *vc, uint32_t allowed_memory_types)
+choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
+                         VkMemoryPropertyFlags required_props)
 {
-   VkMemoryPropertyFlags required_props =
-      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-      (vc->protected ? VK_MEMORY_PROPERTY_PROTECTED_BIT : 0);
-
    for (uint32_t i = 0; i < vc->memory_properties.memoryTypeCount; ++i) {
       VkMemoryPropertyFlags props = vc->memory_properties.memoryTypes[i].propertyFlags;
 
@@ -438,11 +435,24 @@ init_headless(struct vkcube *vc)
    VkMemoryRequirements requirements;
    vkGetImageMemoryRequirements(vc->device, b->image, &requirements);
 
+   if (vc->protected) {
+      /* Host-visible protected memory is useless and contradictory.
+       * And the Vulkan 1.4.304 spec says it does not exist.
+       */
+      fail("headless mode and protected mode are incompatible\n");
+   }
+
+   int32_t mem_type = choose_memory_type_index(vc, requirements.memoryTypeBits,
+                                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+   if (mem_type == -1) {
+      fail("failed to choose VkMemoryType\n");
+   }
+
    vkAllocateMemory(vc->device,
                     &(VkMemoryAllocateInfo) {
                        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                        .allocationSize = requirements.size,
-                       .memoryTypeIndex = find_image_memory(vc, requirements.memoryTypeBits),
+                       .memoryTypeIndex = mem_type,
                     },
                     NULL,
                     &b->mem);
