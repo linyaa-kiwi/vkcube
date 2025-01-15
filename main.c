@@ -219,6 +219,7 @@ init_vk(struct vkcube *vc, const char *extension)
 static void
 init_vk_objects(struct vkcube *vc)
 {
+	printf("vk_object 0 \n");
    vkCreateRenderPass(vc->device,
       &(VkRenderPassCreateInfo) {
          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
@@ -260,7 +261,7 @@ init_vk_objects(struct vkcube *vc)
       },
       NULL,
       &vc->render_pass);
-
+printf("vk_object 1 \n");
    vc->model.init(vc);
 
    vkCreateCommandPool(vc->device,
@@ -466,11 +467,11 @@ init_headless(struct vkcube *vc)
    return 0;
 }
 
-#ifdef HAVE_VULKAN_INTEL_H
+//#ifdef HAVE_VULKAN_INTEL_H
 
 /* KMS display code - render to kernel modesetting fb */
 
-#include <vulkan/vulkan_intel.h>
+//#include <vulkan/vulkan_intel.h>
 
 static struct termios save_tio;
 
@@ -548,12 +549,12 @@ init_kms(struct vkcube *vc)
    drmModeEncoder *encoder;
    int i;
 
-   if (init_vt(vc) == -1)
-      return -1;
+ //  if (init_vt(vc) == -1)
+   //   return -1;
 
-   vc->fd = open("/dev/dri/card0", O_RDWR);
+   vc->fd = open("/dev/dri/card1", O_RDWR);
    fail_if(vc->fd == -1, "failed to open /dev/dri/card0\n");
-
+ 
    /* Get KMS resources and find the first active connecter. We'll use that
       connector and the crtc driving it in the mode it's currently running. */
    resources = drmModeGetResources(vc->fd);
@@ -578,50 +579,99 @@ init_kms(struct vkcube *vc)
    vc->connector = connector;
    vc->width = vc->crtc->mode.hdisplay;
    vc->height = vc->crtc->mode.vdisplay;
-
    vc->gbm_device = gbm_create_device(vc->fd);
-
    init_vk(vc, NULL);
    vc->image_format = VK_FORMAT_R8G8B8A8_SRGB;
    init_vk_objects(vc);
 
-   PFN_vkCreateDmaBufImageINTEL create_dma_buf_image =
-      (PFN_vkCreateDmaBufImageINTEL)vkGetDeviceProcAddr(vc->device, "vkCreateDmaBufImageINTEL");
-
+   
    for (uint32_t i = 0; i < 2; i++) {
       struct vkcube_buffer *b = &vc->buffers[i];
       int fd, stride, ret;
-
-      b->gbm_bo = gbm_bo_create(vc->gbm_device, vc->width, vc->height,
-                                GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+     
+      uint64_t mod = DRM_FORMAT_MOD_LINEAR;
+      b->gbm_bo = gbm_bo_create_with_modifiers(vc->gbm_device, vc->width, vc->height, GBM_FORMAT_XRGB8888, &mod, 1);
+      
+      //b->gbm_bo = gbm_bo_create(vc->gbm_device, vc->width, vc->height,
+        //                        GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
 
       fd = gbm_bo_get_fd(b->gbm_bo);
       stride = gbm_bo_get_stride(b->gbm_bo);
-      create_dma_buf_image(vc->device,
-                           &(VkDmaBufImageCreateInfo) {
-                              .sType = VK_STRUCTURE_TYPE_DMA_BUF_IMAGE_CREATE_INFO_INTEL,
-                              .fd = fd,
-                              .format = vc->image_format,
-                              .extent = { vc->width, vc->height, 1 },
-                              .strideInBytes = stride
-                           },
-                           NULL,
-                           &b->mem,
-                           &b->image);
-      close(fd);
 
+      printf(" 1 . stride is %d \n", stride);
+
+      printf("vc->image_format is : %d \n", vc->image_format);
+      vkCreateImage(vc->device,
+		      &(VkImageCreateInfo) {
+		        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = vc->image_format,
+			.extent = { .width = vc->width, .height = vc->height, .depth = 1 } ,
+			.mipLevels = 1,
+			.arrayLayers = 1,
+			.samples = 1,
+			.tiling = VK_IMAGE_TILING_LINEAR,
+			.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			.flags = vc->protected ? VK_IMAGE_CREATE_PROTECTED_BIT : 0,
+		      },
+		      NULL,
+		      &b->image);
+	VkMemoryRequirements memRequirements;
+	vkGetImageMemoryRequirements(vc->device, b->image, &memRequirements);
+
+      VkImportMemoryFdInfoKHR importMemoryFdInfo = {
+    	.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+    	.pNext = NULL,
+    	.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    	.fd = fd,
+    };
+
+
+      VkImageSubresource subresource = {};
+      subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      subresource.mipLevel = 0;
+      subresource.arrayLayer = 0;
+
+      VkSubresourceLayout layout = {};
+
+      vkGetImageSubresourceLayout(vc->device, b->image, &subresource, &layout);
+
+      printf("Row Pitch: %d \n", layout.rowPitch);
+
+      VkDeviceMemory memory;
+    
+      int32_t mem_type = choose_memory_type_index(vc, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      printf("mem_type is %d \n", mem_type);
+      vkAllocateMemory(vc->device, 
+		      &(VkMemoryAllocateInfo) {
+		      	.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.allocationSize = memRequirements.size,
+			.memoryTypeIndex = mem_type,
+		      },
+		      NULL, 
+		      &b->mem);
+      vkBindImageMemory(vc->device, b->image, b->mem, 0);
+      int size = lseek(fd, 0, SEEK_END);
+      printf("size of lseek result is %d. \n", size); 
+      
+      close(fd);
       b->stride = gbm_bo_get_stride(b->gbm_bo);
+      printf(" 2. b->stride is %d \n", b->stride);
       uint32_t bo_handles[4] = { gbm_bo_get_handle(b->gbm_bo).s32, };
       uint32_t pitches[4] = { stride, };
       uint32_t offsets[4] = { 0, };
+
+
       ret = drmModeAddFB2(vc->fd, vc->width, vc->height,
                           DRM_FORMAT_XRGB8888, bo_handles,
                           pitches, offsets, &b->fb, 0);
-      fail_if(ret == -1, "addfb2 failed\n");
 
+      printf("memRequirements.size is %d \n", memRequirements.size);
+
+
+      fail_if(ret == -1, "addfb2 failed\n");
       init_buffer(vc, b);
    }
-
    return 0;
 }
 
@@ -684,7 +734,7 @@ mainloop_vt(struct vkcube *vc)
    }
 }
 
-#else
+/**#else
 
 static int
 init_kms(struct vkcube *vc)
@@ -698,7 +748,7 @@ mainloop_vt(struct vkcube *vc)
 }
 
 #endif
-
+**/
 /* Swapchain-based code - shared between XCB and Wayland */
 
 #if defined(ENABLE_XCB) || defined(ENABLE_WAYLAND)

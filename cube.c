@@ -333,7 +333,8 @@ init_cube(struct vkcube *vc)
 
    int32_t memory_type = choose_memory_type_index(vc, reqs.memoryTypeBits,
                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+						  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
    if (memory_type == -1)
       fail("find_host_coherent_memory failed");
 
