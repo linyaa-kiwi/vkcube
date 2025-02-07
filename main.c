@@ -270,7 +270,9 @@ init_vk(struct vkcube *vc, const char *winsys_extension)
    uint32_t device_ext_count = 0;
    const char *device_exts[1];
 
-   device_exts[device_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+   if (winsys_extension) {
+      device_exts[device_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+   }
 
    require_device_extensions(vc->physical_device, device_exts, device_ext_count);
 
