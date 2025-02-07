@@ -281,22 +281,27 @@ init_vk(struct vkcube *vc, const char *winsys_extension)
 
    require_device_extensions(vc->physical_device, device_exts, device_ext_count);
 
-   vkCreateDevice(vc->physical_device,
-                  &(VkDeviceCreateInfo) {
-                     .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                     .queueCreateInfoCount = 1,
-                     .pQueueCreateInfos = &(VkDeviceQueueCreateInfo) {
-                        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                        .queueFamilyIndex = 0,
-                        .queueCount = 1,
-                        .flags = vc->protected ? VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT : 0,
-                        .pQueuePriorities = (float []) { 1.0f },
-                     },
-                     .enabledExtensionCount = device_ext_count,
-                     .ppEnabledExtensionNames = device_exts,
-                  },
-                  NULL,
-                  &vc->device);
+   VkDeviceCreateInfo device_create_info = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+
+      /* Be lazy and enable all the features that we queried, even the features we don't use. In
+       * particular, this enables protectedMemory if needed.
+       */
+      .pNext = &features,
+
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &(VkDeviceQueueCreateInfo) {
+         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+         .queueFamilyIndex = 0,
+         .queueCount = 1,
+         .flags = vc->protected ? VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT : 0,
+         .pQueuePriorities = (float []) { 1.0f },
+      },
+      .enabledExtensionCount = device_ext_count,
+      .ppEnabledExtensionNames = device_exts,
+   };
+
+   vkCreateDevice(vc->physical_device, &device_create_info, NULL, &vc->device);
 
    vkGetDeviceQueue2(vc->device, &(VkDeviceQueueInfo2) {
          .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
