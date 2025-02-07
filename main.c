@@ -119,6 +119,50 @@ xstrdup(const char *s)
 
    return dup;
 }
+/** The `type` is used for error messages and must be "instance" or "device". */
+static void
+require_api_version(const char *type, uint32_t _required, uint32_t _actual)
+{
+   /* See VK_MAKE_API_VERSION(). */
+   struct vk_api_version {
+      unsigned variant:3;
+      unsigned major:7;
+      unsigned minor:10;
+      unsigned patch:12;
+   };
+
+   struct vk_api_version required = {
+      .variant = VK_API_VERSION_VARIANT(_required),
+      .major = VK_API_VERSION_MAJOR(_required),
+      .minor = VK_API_VERSION_MINOR(_required),
+      .patch = VK_API_VERSION_PATCH(_required),
+   };
+
+   struct vk_api_version actual = {
+      .variant = VK_API_VERSION_VARIANT(_actual),
+      .major = VK_API_VERSION_MAJOR(_actual),
+      .minor = VK_API_VERSION_MINOR(_actual),
+      .patch = VK_API_VERSION_PATCH(_actual),
+   };
+
+   /* We never check patch version. */
+   assert(required.patch == 0);
+
+   assert(streq(type, "instance") || streq(type, "device"));
+
+   if (actual.variant != required.variant) {
+      fail("required %s api version variant %u, but found variant %u",
+           type, required.variant, actual.variant);
+   }
+
+   if (actual.major != required.major ||
+       actual.minor < required.minor) {
+      fail("required %s api version %u.%u, but found %u.%u",
+           type,
+           required.major, required.minor,
+           actual.major, actual.minor);
+   }
+}
 
 int32_t
 choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
@@ -208,6 +252,16 @@ require_device_extensions(VkPhysicalDevice physical_device,
 static void
 init_vk(struct vkcube *vc, const char *winsys_extension)
 {
+   VkResult res;
+
+   /* Require instance api version 1.1. */
+   const uint32_t required_instance_version = VK_MAKE_API_VERSION(0, 1, 1, 0);
+   uint32_t actual_instance_version;
+   res = vkEnumerateInstanceVersion(&actual_instance_version);
+   if (res != VK_SUCCESS)
+      fail("vkEnumerateInstanceVersion failed");
+   require_api_version("instance", required_instance_version, actual_instance_version);
+
    const char *instance_exts[4] = { NULL };
    uint32_t instance_ext_count = 0;
 
@@ -223,12 +277,12 @@ init_vk(struct vkcube *vc, const char *winsys_extension)
 
    require_instance_extensions(instance_exts, instance_ext_count);
 
-   VkResult res = vkCreateInstance(&(VkInstanceCreateInfo) {
+   res = vkCreateInstance(&(VkInstanceCreateInfo) {
          .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
          .pApplicationInfo = &(VkApplicationInfo) {
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = "vkcube",
-            .apiVersion = VK_MAKE_VERSION(1, 1, 0),
+            .apiVersion = required_instance_version,
          },
          .enabledExtensionCount = instance_ext_count,
          .ppEnabledExtensionNames = instance_exts,
@@ -261,8 +315,12 @@ init_vk(struct vkcube *vc, const char *winsys_extension)
 
    VkPhysicalDeviceProperties properties;
    vkGetPhysicalDeviceProperties(vc->physical_device, &properties);
+
    printf("vendor id %04x, device name %s\n",
           properties.vendorID, properties.deviceName);
+
+   /* Require device api version 1.1. */
+   require_api_version("device", VK_MAKE_API_VERSION(0, 1, 1, 0), properties.apiVersion);
 
    vkGetPhysicalDeviceMemoryProperties(vc->physical_device, &vc->memory_properties);
 
