@@ -75,7 +75,7 @@ enum display_mode {
 static enum display_mode display_mode = DISPLAY_MODE_AUTO;
 static uint32_t width = 1024, height = 768;
 static const char *arg_out_file = "./cube.png";
-static bool protected_chain = false;
+static bool require_protected = false;
 
 void noreturn
 failv(const char *format, va_list args)
@@ -135,9 +135,94 @@ choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
    return -1;
 }
 
-static void
-init_vk(struct vkcube *vc, const char *extension)
+static bool
+has_extension(const VkExtensionProperties *props, uint32_t prop_count,
+              const char *extension_name)
 {
+   for (uint32_t i = 0; i < prop_count; i++) {
+      if (streq(props[i].extensionName, extension_name)) {
+         return true;
+      }
+   }
+
+   return false;
+}
+
+static void
+require_extensions(const VkExtensionProperties *props,
+                   uint32_t prop_count,
+                   const char **extensions,
+                   uint32_t extension_count)
+{
+   bool fail = false;
+
+   for (uint32_t i = 0; i < extension_count; i++) {
+      if (!has_extension(props, prop_count, extensions[i])) {
+         fail = true;
+         fprintf(stderr, "missing required extension %s\n", extensions[i]);
+      }
+   }
+
+   if (fail)
+      exit(EXIT_FAILURE);
+}
+
+static void
+require_instance_extensions(const char **extensions, uint32_t extension_count)
+{
+   VkResult r;
+
+   uint32_t prop_count = 0;
+   r = vkEnumerateInstanceExtensionProperties(NULL, &prop_count, NULL);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateInstanceExtensionProperties failed");
+
+   VkExtensionProperties props[prop_count];
+   r = vkEnumerateInstanceExtensionProperties(NULL, &prop_count, props);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateInstanceExtensionProperties failed");
+
+   require_extensions(props, prop_count, extensions, extension_count);
+}
+
+static void
+require_device_extensions(VkPhysicalDevice physical_device,
+                          const char **extensions,
+                          uint32_t extension_count)
+{
+   VkResult r;
+
+   uint32_t prop_count = 0;
+   r = vkEnumerateDeviceExtensionProperties(physical_device, NULL, &prop_count, NULL);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateDeviceExtensionProperties failed");
+
+   VkExtensionProperties props[prop_count];
+   r = vkEnumerateDeviceExtensionProperties(physical_device, NULL, &prop_count, props);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateDeviceExtensionProperties failed");
+
+   require_extensions(props, prop_count, extensions, extension_count);
+}
+
+static void
+init_vk(struct vkcube *vc, const char *winsys_extension)
+{
+   const char *instance_exts[4] = { NULL };
+   uint32_t instance_ext_count = 0;
+
+   if (winsys_extension) {
+      instance_exts[instance_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+      instance_exts[instance_ext_count++] = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
+      instance_exts[instance_ext_count++] = winsys_extension;
+   }
+
+   if (vc->protected) {
+      instance_exts[instance_ext_count++] = VK_KHR_SURFACE_PROTECTED_CAPABILITIES_EXTENSION_NAME;
+   }
+
+   require_instance_extensions(instance_exts, instance_ext_count);
+
    VkResult res = vkCreateInstance(&(VkInstanceCreateInfo) {
          .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
          .pApplicationInfo = &(VkApplicationInfo) {
@@ -145,11 +230,8 @@ init_vk(struct vkcube *vc, const char *extension)
             .pApplicationName = "vkcube",
             .apiVersion = VK_MAKE_VERSION(1, 1, 0),
          },
-         .enabledExtensionCount = extension ? 2 : 0,
-         .ppEnabledExtensionNames = (const char *[2]) {
-            VK_KHR_SURFACE_EXTENSION_NAME,
-            extension,
-         },
+         .enabledExtensionCount = instance_ext_count,
+         .ppEnabledExtensionNames = instance_exts,
       },
       NULL,
       &vc->instance);
@@ -174,9 +256,8 @@ init_vk(struct vkcube *vc, const char *extension)
 
    vkGetPhysicalDeviceFeatures2(vc->physical_device, &features);
 
-   if (protected_chain && !protected_features.protectedMemory)
-      printf("Requested protected memory but not supported by device, dropping...\n");
-   vc->protected = protected_chain && protected_features.protectedMemory;
+   if (vc->protected && !protected_features.protectedMemory)
+      fail("vulkan device does not support protected memory");
 
    VkPhysicalDeviceProperties properties;
    vkGetPhysicalDeviceProperties(vc->physical_device, &properties);
@@ -191,6 +272,15 @@ init_vk(struct vkcube *vc, const char *extension)
    vkGetPhysicalDeviceQueueFamilyProperties(vc->physical_device, &count, props);
    assert(props[0].queueFlags & VK_QUEUE_GRAPHICS_BIT);
 
+   uint32_t device_ext_count = 0;
+   const char *device_exts[1];
+
+   if (winsys_extension) {
+      device_exts[device_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+   }
+
+   require_device_extensions(vc->physical_device, device_exts, device_ext_count);
+
    vkCreateDevice(vc->physical_device,
                   &(VkDeviceCreateInfo) {
                      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -202,10 +292,8 @@ init_vk(struct vkcube *vc, const char *extension)
                         .flags = vc->protected ? VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT : 0,
                         .pQueuePriorities = (float []) { 1.0f },
                      },
-                     .enabledExtensionCount = 1,
-                     .ppEnabledExtensionNames = (const char * const []) {
-                        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                     },
+                     .enabledExtensionCount = device_ext_count,
+                     .ppEnabledExtensionNames = device_exts,
                   },
                   NULL,
                   &vc->device);
@@ -749,11 +837,35 @@ choose_surface_format(struct vkcube *vc)
 static void
 create_swapchain(struct vkcube *vc)
 {
-   VkSurfaceCapabilitiesKHR surface_caps;
-   vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vc->physical_device, vc->surface,
-                                             &surface_caps);
-   assert(surface_caps.supportedCompositeAlpha &
+   VkPhysicalDeviceSurfaceInfo2KHR surface_info = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
+      .surface = vc->surface,
+   };
+
+   VkSurfaceCapabilities2KHR surface_caps2 = {
+      .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR,
+   };
+
+   VkSurfaceProtectedCapabilitiesKHR surface_protected_caps = {
+      .sType = VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR,
+   };
+
+   if (vc->protected) {
+      insert_vk_chain(&surface_caps2, &surface_protected_caps);
+   }
+
+   vkGetPhysicalDeviceSurfaceCapabilities2KHR(vc->physical_device,
+                                              &surface_info,
+                                              &surface_caps2);
+
+   VkSurfaceCapabilitiesKHR *surface_caps = &surface_caps2.surfaceCapabilities;
+
+   assert(surface_caps->supportedCompositeAlpha &
           VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR);
+
+   if (vc->protected && !surface_protected_caps.supportsProtected) {
+      fail("VkSurface does not support protected mode");
+   }
 
    VkBool32 supported;
    vkGetPhysicalDeviceSurfaceSupportKHR(vc->physical_device, 0, vc->surface,
@@ -776,16 +888,16 @@ create_swapchain(struct vkcube *vc)
    }
 
    uint32_t minImageCount = 2;
-   if (minImageCount < surface_caps.minImageCount) {
-      if (surface_caps.minImageCount > MAX_NUM_IMAGES)
-          fail("surface_caps.minImageCount is too large (is: %d, max: %d)",
-               surface_caps.minImageCount, MAX_NUM_IMAGES);
-      minImageCount = surface_caps.minImageCount;
+   if (minImageCount < surface_caps->minImageCount) {
+      if (surface_caps->minImageCount > MAX_NUM_IMAGES)
+          fail("VkSurfaceCapabilities::minImageCount is too large (is: %d, max: %d)",
+               surface_caps->minImageCount, MAX_NUM_IMAGES);
+      minImageCount = surface_caps->minImageCount;
    }
 
-   if (surface_caps.maxImageCount > 0 &&
-       minImageCount > surface_caps.maxImageCount) {
-      minImageCount = surface_caps.maxImageCount;
+   if (surface_caps->maxImageCount > 0 &&
+       minImageCount > surface_caps->maxImageCount) {
+      minImageCount = surface_caps->maxImageCount;
    }
 
    vkCreateSwapchainKHR(vc->device,
@@ -1631,7 +1743,7 @@ print_usage(FILE *f)
       "  -o <file>               Path to output image when running headless.\n"
       "                          Default is \"./cube.png\".\n"
       "\n"
-      "  -p                      Attempt to use protected content (encrypted).\n"
+      "  -p                      Require protected content.\n"
       ;
 
    fprintf(f, "%s", usage);
@@ -1702,7 +1814,7 @@ parse_args(int argc, char *argv[])
          arg_out_file = xstrdup(optarg);
          break;
       case 'p':
-         protected_chain = true;
+         require_protected = true;
          break;
       case '?':
          usage_error("invalid option '-%c'", optopt);
@@ -1830,7 +1942,7 @@ int main(int argc, char *argv[])
 #endif
    vc.width = width;
    vc.height = height;
-   vc.protected = protected_chain;
+   vc.protected = require_protected;
    gettimeofday(&vc.start_tv, NULL);
 
    init_display(&vc);
