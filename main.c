@@ -208,13 +208,17 @@ require_device_extensions(VkPhysicalDevice physical_device,
 static void
 init_vk(struct vkcube *vc, const char *winsys_extension)
 {
-   const char *instance_exts[3] = { NULL };
+   const char *instance_exts[4] = { NULL };
    uint32_t instance_ext_count = 0;
 
    if (winsys_extension) {
       instance_exts[instance_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
       instance_exts[instance_ext_count++] = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
       instance_exts[instance_ext_count++] = winsys_extension;
+   }
+
+   if (vc->protected) {
+      instance_exts[instance_ext_count++] = VK_KHR_SURFACE_PROTECTED_CAPABILITIES_EXTENSION_NAME;
    }
 
    require_instance_extensions(instance_exts, instance_ext_count);
@@ -842,6 +846,14 @@ create_swapchain(struct vkcube *vc)
       .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR,
    };
 
+   VkSurfaceProtectedCapabilitiesKHR surface_protected_caps = {
+      .sType = VK_STRUCTURE_TYPE_SURFACE_PROTECTED_CAPABILITIES_KHR,
+   };
+
+   if (vc->protected) {
+      insert_vk_chain(&surface_caps2, &surface_protected_caps);
+   }
+
    vkGetPhysicalDeviceSurfaceCapabilities2KHR(vc->physical_device,
                                               &surface_info,
                                               &surface_caps2);
@@ -850,6 +862,10 @@ create_swapchain(struct vkcube *vc)
 
    assert(surface_caps->supportedCompositeAlpha &
           VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR);
+
+   if (vc->protected && !surface_protected_caps.supportsProtected) {
+      fail("VkSurface does not support protected mode");
+   }
 
    VkBool32 supported;
    vkGetPhysicalDeviceSurfaceSupportKHR(vc->physical_device, 0, vc->surface,
