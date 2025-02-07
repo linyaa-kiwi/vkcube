@@ -75,7 +75,7 @@ enum display_mode {
 static enum display_mode display_mode = DISPLAY_MODE_AUTO;
 static uint32_t width = 1024, height = 768;
 static const char *arg_out_file = "./cube.png";
-static bool protected_chain = false;
+static bool require_protected = false;
 
 void noreturn
 failv(const char *format, va_list args)
@@ -174,9 +174,8 @@ init_vk(struct vkcube *vc, const char *extension)
 
    vkGetPhysicalDeviceFeatures2(vc->physical_device, &features);
 
-   if (protected_chain && !protected_features.protectedMemory)
-      printf("Requested protected memory but not supported by device, dropping...\n");
-   vc->protected = protected_chain && protected_features.protectedMemory;
+   if (vc->protected && !protected_features.protectedMemory)
+      fail("vulkan device does not support protected memory");
 
    VkPhysicalDeviceProperties properties;
    vkGetPhysicalDeviceProperties(vc->physical_device, &properties);
@@ -1631,7 +1630,7 @@ print_usage(FILE *f)
       "  -o <file>               Path to output image when running headless.\n"
       "                          Default is \"./cube.png\".\n"
       "\n"
-      "  -p                      Attempt to use protected content (encrypted).\n"
+      "  -p                      Require protected content.\n"
       ;
 
    fprintf(f, "%s", usage);
@@ -1702,7 +1701,7 @@ parse_args(int argc, char *argv[])
          arg_out_file = xstrdup(optarg);
          break;
       case 'p':
-         protected_chain = true;
+         require_protected = true;
          break;
       case '?':
          usage_error("invalid option '-%c'", optopt);
@@ -1830,7 +1829,7 @@ int main(int argc, char *argv[])
 #endif
    vc.width = width;
    vc.height = height;
-   vc.protected = protected_chain;
+   vc.protected = require_protected;
    gettimeofday(&vc.start_tv, NULL);
 
    init_display(&vc);
