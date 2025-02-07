@@ -135,9 +135,89 @@ choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
    return -1;
 }
 
-static void
-init_vk(struct vkcube *vc, const char *extension)
+static bool
+has_extension(const VkExtensionProperties *props, uint32_t prop_count,
+              const char *extension_name)
 {
+   for (uint32_t i = 0; i < prop_count; i++) {
+      if (streq(props[i].extensionName, extension_name)) {
+         return true;
+      }
+   }
+
+   return false;
+}
+
+static void
+require_extensions(const VkExtensionProperties *props,
+                   uint32_t prop_count,
+                   const char **extensions,
+                   uint32_t extension_count)
+{
+   bool fail = false;
+
+   for (uint32_t i = 0; i < extension_count; i++) {
+      if (!has_extension(props, prop_count, extensions[i])) {
+         fail = true;
+         fprintf(stderr, "missing required extension %s\n", extensions[i]);
+      }
+   }
+
+   if (fail)
+      exit(EXIT_FAILURE);
+}
+
+static void
+require_instance_extensions(const char **extensions, uint32_t extension_count)
+{
+   VkResult r;
+
+   uint32_t prop_count = 0;
+   r = vkEnumerateInstanceExtensionProperties(NULL, &prop_count, NULL);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateInstanceExtensionProperties failed");
+
+   VkExtensionProperties props[prop_count];
+   r = vkEnumerateInstanceExtensionProperties(NULL, &prop_count, props);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateInstanceExtensionProperties failed");
+
+   require_extensions(props, prop_count, extensions, extension_count);
+}
+
+static void
+require_device_extensions(VkPhysicalDevice physical_device,
+                          const char **extensions,
+                          uint32_t extension_count)
+{
+   VkResult r;
+
+   uint32_t prop_count = 0;
+   r = vkEnumerateDeviceExtensionProperties(physical_device, NULL, &prop_count, NULL);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateDeviceExtensionProperties failed");
+
+   VkExtensionProperties props[prop_count];
+   r = vkEnumerateDeviceExtensionProperties(physical_device, NULL, &prop_count, props);
+   if (r != VK_SUCCESS)
+      fail("vkEnumerateDeviceExtensionProperties failed");
+
+   require_extensions(props, prop_count, extensions, extension_count);
+}
+
+static void
+init_vk(struct vkcube *vc, const char *winsys_extension)
+{
+   const char *instance_exts[2] = { NULL };
+   uint32_t instance_ext_count = 0;
+
+   if (winsys_extension) {
+      instance_exts[instance_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+      instance_exts[instance_ext_count++] = winsys_extension;
+   }
+
+   require_instance_extensions(instance_exts, instance_ext_count);
+
    VkResult res = vkCreateInstance(&(VkInstanceCreateInfo) {
          .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
          .pApplicationInfo = &(VkApplicationInfo) {
@@ -145,11 +225,8 @@ init_vk(struct vkcube *vc, const char *extension)
             .pApplicationName = "vkcube",
             .apiVersion = VK_MAKE_VERSION(1, 1, 0),
          },
-         .enabledExtensionCount = extension ? 2 : 0,
-         .ppEnabledExtensionNames = (const char *[2]) {
-            VK_KHR_SURFACE_EXTENSION_NAME,
-            extension,
-         },
+         .enabledExtensionCount = instance_ext_count,
+         .ppEnabledExtensionNames = instance_exts,
       },
       NULL,
       &vc->instance);
@@ -190,6 +267,13 @@ init_vk(struct vkcube *vc, const char *extension)
    vkGetPhysicalDeviceQueueFamilyProperties(vc->physical_device, &count, props);
    assert(props[0].queueFlags & VK_QUEUE_GRAPHICS_BIT);
 
+   uint32_t device_ext_count = 0;
+   const char *device_exts[1];
+
+   device_exts[device_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+
+   require_device_extensions(vc->physical_device, device_exts, device_ext_count);
+
    vkCreateDevice(vc->physical_device,
                   &(VkDeviceCreateInfo) {
                      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -201,10 +285,8 @@ init_vk(struct vkcube *vc, const char *extension)
                         .flags = vc->protected ? VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT : 0,
                         .pQueuePriorities = (float []) { 1.0f },
                      },
-                     .enabledExtensionCount = 1,
-                     .ppEnabledExtensionNames = (const char * const []) {
-                        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                     },
+                     .enabledExtensionCount = device_ext_count,
+                     .ppEnabledExtensionNames = device_exts,
                   },
                   NULL,
                   &vc->device);
