@@ -208,11 +208,12 @@ require_device_extensions(VkPhysicalDevice physical_device,
 static void
 init_vk(struct vkcube *vc, const char *winsys_extension)
 {
-   const char *instance_exts[2] = { NULL };
+   const char *instance_exts[3] = { NULL };
    uint32_t instance_ext_count = 0;
 
    if (winsys_extension) {
       instance_exts[instance_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+      instance_exts[instance_ext_count++] = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
       instance_exts[instance_ext_count++] = winsys_extension;
    }
 
@@ -832,10 +833,22 @@ choose_surface_format(struct vkcube *vc)
 static void
 create_swapchain(struct vkcube *vc)
 {
-   VkSurfaceCapabilitiesKHR surface_caps;
-   vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vc->physical_device, vc->surface,
-                                             &surface_caps);
-   assert(surface_caps.supportedCompositeAlpha &
+   VkPhysicalDeviceSurfaceInfo2KHR surface_info = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
+      .surface = vc->surface,
+   };
+
+   VkSurfaceCapabilities2KHR surface_caps2 = {
+      .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR,
+   };
+
+   vkGetPhysicalDeviceSurfaceCapabilities2KHR(vc->physical_device,
+                                              &surface_info,
+                                              &surface_caps2);
+
+   VkSurfaceCapabilitiesKHR *surface_caps = &surface_caps2.surfaceCapabilities;
+
+   assert(surface_caps->supportedCompositeAlpha &
           VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR);
 
    VkBool32 supported;
@@ -859,16 +872,16 @@ create_swapchain(struct vkcube *vc)
    }
 
    uint32_t minImageCount = 2;
-   if (minImageCount < surface_caps.minImageCount) {
-      if (surface_caps.minImageCount > MAX_NUM_IMAGES)
-          fail("surface_caps.minImageCount is too large (is: %d, max: %d)",
-               surface_caps.minImageCount, MAX_NUM_IMAGES);
-      minImageCount = surface_caps.minImageCount;
+   if (minImageCount < surface_caps->minImageCount) {
+      if (surface_caps->minImageCount > MAX_NUM_IMAGES)
+          fail("VkSurfaceCapabilities::minImageCount is too large (is: %d, max: %d)",
+               surface_caps->minImageCount, MAX_NUM_IMAGES);
+      minImageCount = surface_caps->minImageCount;
    }
 
-   if (surface_caps.maxImageCount > 0 &&
-       minImageCount > surface_caps.maxImageCount) {
-      minImageCount = surface_caps.maxImageCount;
+   if (surface_caps->maxImageCount > 0 &&
+       minImageCount > surface_caps->maxImageCount) {
+      minImageCount = surface_caps->maxImageCount;
    }
 
    vkCreateSwapchainKHR(vc->device,
