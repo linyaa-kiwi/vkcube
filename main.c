@@ -163,13 +163,15 @@ init_vk(struct vkcube *vc, const char *extension)
    vc->physical_device = pd[0];
    printf("%d physical devices\n", count);
 
+   VkPhysicalDeviceFeatures2 features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+   };
+
    VkPhysicalDeviceProtectedMemoryFeatures protected_features = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES,
    };
-   VkPhysicalDeviceFeatures2 features = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &protected_features,
-   };
+   insert_vk_chain(&features, &protected_features);
+
    vkGetPhysicalDeviceFeatures2(vc->physical_device, &features);
 
    if (protected_chain && !protected_features.protectedMemory)
