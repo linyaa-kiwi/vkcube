@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdarg.h>
 #include <stdnoreturn.h>
 #include <sys/time.h>
@@ -130,3 +131,17 @@ streq(const char *a, const char *b)
 
 int32_t choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
                                  VkMemoryPropertyFlags required_props);
+
+/**
+ * Insert `next` into the pNext chain immediately after `base`. Both must be a VkBaseOutStructure.
+ */
+static inline void
+insert_vk_chain(void *_base, void *_next)
+{
+   VkBaseOutStructure *base = _base;
+   VkBaseOutStructure *next = _next;
+
+   assert(next->pNext == NULL);
+   next->pNext = base->pNext;
+   base->pNext = next;
+}
