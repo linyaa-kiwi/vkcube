@@ -563,11 +563,48 @@ write_buffer(struct vkcube *vc, struct vkcube_buffer *b)
 static int
 init_headless(struct vkcube *vc)
 {
+   VkResult result;
    init_vk(vc, NULL);
    vc->image_format = VK_FORMAT_B8G8R8A8_SRGB;
    init_vk_objects(vc);
 
    struct vkcube_buffer *b = &vc->buffers[0];
+
+   VkFormatProperties2 format_properties = {
+      .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+   };
+
+   vkGetPhysicalDeviceFormatProperties2(vc->physical_device,
+		                        vc->image_format,
+					&format_properties);
+
+   if (!(format_properties.formatProperties.linearTilingFeatures &
+	 VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+       fail("Requested image usage is not supported for this format\n");
+
+   VkPhysicalDeviceImageFormatInfo2 image_format_info = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+      .format = vc->image_format,
+      .type = VK_IMAGE_TYPE_2D,
+      .tiling = VK_IMAGE_TILING_LINEAR,
+      .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      .flags = vc->protected ? VK_IMAGE_CREATE_PROTECTED_BIT : 0,
+   };
+
+   VkImageFormatProperties2 image_format_properties = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+   };
+
+   result = vkGetPhysicalDeviceImageFormatProperties2(vc->physical_device,
+		                                     &image_format_info,
+					             &image_format_properties);
+
+   if (result != VK_SUCCESS)
+      fail("Image format not supported\n");
+
+   if (vc->width > image_format_properties.imageFormatProperties.maxExtent.width ||
+       vc->height > image_format_properties.imageFormatProperties.maxExtent.height)
+      fail("Requested image extent exceeds the maximum supported extent\n");
 
    vkCreateImage(vc->device,
                  &(VkImageCreateInfo) {
