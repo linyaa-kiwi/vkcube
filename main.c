@@ -56,6 +56,7 @@
 #include <assert.h>
 #include <sys/mman.h>
 #include <linux/input.h>
+#include <dirent.h>
 
 #include "common.h"
 
@@ -176,6 +177,31 @@ choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
          return i;
    }
 
+   return -1;
+}
+
+static int choose_device(struct vkcube *vc)
+{
+   DIR *dir = opendir("/dev/dri/");
+   if (dir == NULL) {
+      fprintf(stderr, "Failed to open /dev/dri/ directory\n");
+      return -1;
+   }
+
+   struct dirent *entry;
+   while ((entry = readdir(dir)) != NULL) {
+      if (strncmp(entry->d_name, "card", 4) == 0) {
+         char device_path[256];
+	 snprintf(device_path, sizeof(device_path),
+                  "/dev/dri/%s", entry->d_name);
+	 vc->fd = open(device_path, O_RDWR);
+	 if (vc->fd >= 0)
+            return vc->fd;
+      }
+   }
+
+   fprintf(stderr, "failed to open card \n");
+   closedir(dir);
    return -1;
 }
 
@@ -738,8 +764,8 @@ init_kms(struct vkcube *vc)
    if (init_vt(vc) == -1)
       return -1;
 
-   vc->fd = open("/dev/dri/card0", O_RDWR);
-   fail_if(vc->fd == -1, "failed to open /dev/dri/card0\n");
+   vc->fd = choose_device(vc);
+   fail_if(vc->fd == -1, "failed to open /dev/dri/card\n");
 
    /* Get KMS resources and find the first active connecter. We'll use that
       connector and the crtc driving it in the mode it's currently running. */
