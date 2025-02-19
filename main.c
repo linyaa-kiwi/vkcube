@@ -792,6 +792,39 @@ init_kms(struct vkcube *vc)
       stride = gbm_bo_get_stride(b->gbm_bo);
       offset = gbm_bo_get_offset(b->gbm_bo, 0);
 
+      VkFormatProperties2 format_properties = {
+         .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+      };
+
+      vkGetPhysicalDeviceFormatProperties2(vc->physical_device,
+		                           vc->image_format,
+					   &format_properties);
+      if (!(format_properties.formatProperties.linearTilingFeatures &
+	    VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+         fail("Requested image usage is not supported for this format\n");
+
+      VkPhysicalDeviceImageFormatInfo2 image_format_info = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+	 .format = vc->image_format,
+	 .type = VK_IMAGE_TYPE_2D,
+	 .tiling = VK_IMAGE_TILING_LINEAR,
+	 .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+	 .flags = vc->protected ? VK_IMAGE_CREATE_PROTECTED_BIT : 0,
+      };
+
+      VkImageFormatProperties2 image_format_properties = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+      };
+      result = vkGetPhysicalDeviceImageFormatProperties2(vc->physical_device,
+		                                         &image_format_info,
+							 &image_format_properties);
+      if (result != VK_SUCCESS)
+         fail("Image format not supported\n");
+
+      if (vc->width > image_format_properties.imageFormatProperties.maxExtent.width ||
+	  vc->height > image_format_properties.imageFormatProperties.maxExtent.height)
+         fail("Requeted image extend exceeds the maximum supported extend \n");
+
       VkImageCreateInfo img_info = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
          .flags = vc->protected ? VK_IMAGE_CREATE_PROTECTED_BIT : 0,
