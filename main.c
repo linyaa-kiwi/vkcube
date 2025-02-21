@@ -56,6 +56,7 @@
 #include <assert.h>
 #include <sys/mman.h>
 #include <linux/input.h>
+#include <dirent.h>
 
 #include "common.h"
 
@@ -72,10 +73,38 @@ enum display_mode {
    DISPLAY_MODE_KHR,
 };
 
+typedef struct {
+   const char *name;
+   uint64_t value;
+} DrmModifierEntry;
+
+static const DrmModifierEntry drm_modifiers[] = {
+   { "DRM_FORMAT_MOD_LINEAR", DRM_FORMAT_MOD_LINEAR },
+   { "I915_FORMAT_MOD_Y_TILED_CCS", I915_FORMAT_MOD_Y_TILED_CCS },
+   { "I915_FORMAT_MOD_Yf_TILED_CCS", I915_FORMAT_MOD_Yf_TILED_CCS },
+   { "I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS },
+   { "I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS", I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS },
+   { "I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC },
+};
+
+#define DRM_MODIFIER_COUNT (sizeof(drm_modifiers) / sizeof(drm_modifiers[0]))
+static uint64_t drm_modifier = DRM_FORMAT_MOD_LINEAR;
 static enum display_mode display_mode = DISPLAY_MODE_AUTO;
 static uint32_t width = 1024, height = 768;
 static const char *arg_out_file = "./cube.png";
 static bool require_protected = false;
+static bool is_linear = true;
+
+static uint64_t lookup_drm_modifier(const char *name) {
+   for(size_t i = 0; i < DRM_MODIFIER_COUNT; i++) {
+      if(strcmp(drm_modifiers[i].name, name) == 0) {
+         is_linear = false;
+         return drm_modifiers[i].value;
+      }
+   }
+   is_linear = true;
+   return DRM_FORMAT_MOD_LINEAR;
+}
 
 void noreturn
 failv(const char *format, va_list args)
@@ -176,6 +205,31 @@ choose_memory_type_index(struct vkcube *vc, uint32_t allowed_memory_types,
          return i;
    }
 
+   return -1;
+}
+
+static int choose_device(struct vkcube *vc)
+{
+   DIR *dir = opendir("/dev/dri/");
+   if (dir == NULL) {
+      fprintf(stderr, "Failed to open /dev/dri/ directory\n");
+      return -1;
+   }
+
+   struct dirent *entry;
+   while ((entry = readdir(dir)) != NULL) {
+      if (strncmp(entry->d_name, "card", 4) == 0) {
+         char device_path[256];
+	 snprintf(device_path, sizeof(device_path),
+                  "/dev/dri/%s", entry->d_name);
+	 vc->fd = open(device_path, O_RDWR);
+	 if (vc->fd >= 0)
+            return vc->fd;
+      }
+   }
+
+   fprintf(stderr, "failed to open card \n");
+   closedir(dir);
    return -1;
 }
 
@@ -738,8 +792,8 @@ init_kms(struct vkcube *vc)
    if (init_vt(vc) == -1)
       return -1;
 
-   vc->fd = open("/dev/dri/card0", O_RDWR);
-   fail_if(vc->fd == -1, "failed to open /dev/dri/card0\n");
+   vc->fd = choose_device(vc);
+   fail_if(vc->fd == -1, "failed to open /dev/dri/card\n");
 
    /* Get KMS resources and find the first active connecter. We'll use that
       connector and the crtc driving it in the mode it's currently running. */
@@ -776,21 +830,79 @@ init_kms(struct vkcube *vc)
       struct vkcube_buffer *b = &vc->buffers[i];
       int fd, stride, offset, ret;
 
-      /* TODO: Support non-linear modifiers. */
-      uint64_t mod = DRM_FORMAT_MOD_LINEAR;
       uint32_t flags = GBM_BO_USE_SCANOUT |
                        (vc->protected ? GBM_BO_USE_PROTECTED : 0);
       b->gbm_bo = gbm_bo_create_with_modifiers2(vc->gbm_device,
                                                 vc->width,
                                                 vc->height,
                                                 GBM_FORMAT_XRGB8888,
-                                                &mod, 1, flags);
+                                                &drm_modifier, 1, flags);
       if(!b->gbm_bo)
          fail("failed to create gbm bo\n");
 
       fd = gbm_bo_get_fd(b->gbm_bo);
       stride = gbm_bo_get_stride(b->gbm_bo);
       offset = gbm_bo_get_offset(b->gbm_bo, 0);
+
+      VkDrmFormatModifierPropertiesListEXT modifier_list = {
+         .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+      };
+      VkFormatProperties2 format_properties = {
+         .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+	 .pNext = NULL,
+      };
+
+      format_properties.pNext = &modifier_list;
+      uint32_t modifier_count = modifier_list.drmFormatModifierCount;
+      VkDrmFormatModifierPropertiesEXT* modifiers = 
+         (VkDrmFormatModifierPropertiesEXT*) malloc(modifier_count *
+         sizeof(VkDrmFormatModifierPropertiesEXT));
+      modifier_list.pDrmFormatModifierProperties = modifiers;
+      vkGetPhysicalDeviceFormatProperties2(vc->physical_device,
+		                           vc->image_format,
+					   &format_properties);
+      if (is_linear) {
+         if (!(format_properties.formatProperties.linearTilingFeatures &
+	     VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+            fail("Requested image usage is not supported for this format\n");
+      } else {
+         VkFormatFeatureFlags requiredFeatures = 0;
+         for (uint32_t i = 0; i < modifier_count; i++) {
+           if (modifiers[i].drmFormatModifier == drm_modifier) {
+	      requiredFeatures = modifiers[i].drmFormatModifierTilingFeatures;
+	      break;   
+	   }
+         }
+      }
+
+      VkPhysicalDeviceImageFormatInfo2 image_format_info = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+	 .format = vc->image_format,
+	 .type = VK_IMAGE_TYPE_2D,
+	 .tiling = VK_IMAGE_TILING_LINEAR,
+	 .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+	 .flags = vc->protected ? VK_IMAGE_CREATE_PROTECTED_BIT : 0,
+      };
+
+      VkImageFormatProperties2 image_format_properties = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+      };
+      result = vkGetPhysicalDeviceImageFormatProperties2(vc->physical_device,
+		                                         &image_format_info,
+							 &image_format_properties);
+      if (result != VK_SUCCESS)
+         fail("Image format not supported\n");
+
+      if (vc->width > image_format_properties.imageFormatProperties.maxExtent.width ||
+	  vc->height > image_format_properties.imageFormatProperties.maxExtent.height)
+         fail("Requeted image extend exceeds the maximum supported extend \n");
+
+      int img_tiling;
+      if (is_linear) {
+         img_tiling = VK_IMAGE_TILING_LINEAR;
+      } else {
+         img_tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+      }      
 
       VkImageCreateInfo img_info = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -801,7 +913,7 @@ init_kms(struct vkcube *vc)
          .mipLevels = 1,
          .arrayLayers = 1,
          .samples = 1,
-         .tiling = VK_IMAGE_TILING_LINEAR,
+         .tiling = img_tiling,
          .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
       };
 
@@ -812,20 +924,44 @@ init_kms(struct vkcube *vc)
 
       insert_vk_chain(&img_info, &external_img_info);
 
-      VkSubresourceLayout plane_layouts[1] = {
-         {
+      int plane_count = 0;
+      VkSubresourceLayout plane_layouts[2];
+      if(is_linear) {
+         plane_count = 1;
+         plane_layouts[0] = (VkSubresourceLayout){
             .offset = offset,
             .rowPitch = stride,
             .arrayPitch = 0,
             .depthPitch = 0,
             .size = 0,
-         },
-      };
+         };
+      } else {
+         plane_count = 2;
+         int offset0 = gbm_bo_get_offset(b->gbm_bo,0);
+         int offset1 = gbm_bo_get_offset(b->gbm_bo, 1);
+         int stride0 = gbm_bo_get_stride_for_plane(b->gbm_bo, 0);
+         int stride1 = gbm_bo_get_stride_for_plane(b ->gbm_bo, 1);
+         int bo_height = gbm_bo_get_height(b->gbm_bo);
+         plane_layouts[0] = (VkSubresourceLayout) {
+	    .offset = offset0,
+            .rowPitch = stride0,
+            .arrayPitch = 0,
+            .depthPitch = 0,
+            .size = 0,
+	 };
+	 plane_layouts[1] = (VkSubresourceLayout) {
+            .offset = offset1,
+	    .rowPitch = stride1,
+            .arrayPitch = 0,
+            .depthPitch = 0,
+            .size = 0,
+         };
+      }
 
       VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-         .drmFormatModifier = mod,
-         .drmFormatModifierPlaneCount = 1,
+         .drmFormatModifier = drm_modifier,
+         .drmFormatModifierPlaneCount = plane_count,
          .pPlaneLayouts = plane_layouts,
       };
 
@@ -836,21 +972,34 @@ init_kms(struct vkcube *vc)
          fail("vkCreateImage failed\n");
 
       VkMemoryRequirements memory_requirements;
-      vkGetImageMemoryRequirements(vc->device, b->image, &memory_requirements);
+      if (is_linear) {
+         vkGetImageMemoryRequirements(vc->device, b->image, &memory_requirements);
 
-      VkImageSubresource image_subresource = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-         .mipLevel = 0,
-         .arrayLayer = 0,
-      };
+         VkImageSubresource image_subresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .arrayLayer = 0,
+         };
 
-      VkSubresourceLayout layout = {};
-      vkGetImageSubresourceLayout(vc->device, b->image, &image_subresource, &layout);
-
+         VkSubresourceLayout layout = {};
+         vkGetImageSubresourceLayout(vc->device, b->image, &image_subresource, &layout);
+      } else {
+         VkImageMemoryRequirementsInfo2 imageInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+            .pNext = NULL,
+            .image = b->image,
+         };
+         VkMemoryRequirements2 memRequirements2 = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+            .pNext = NULL
+         };
+         vkGetImageMemoryRequirements2(vc->device, &imageInfo, &memRequirements2);
+         memory_requirements = memRequirements2.memoryRequirements;
+      }
       int32_t mem_type = choose_memory_type_index(vc,
                                                   memory_requirements.memoryTypeBits,
                                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-      if(mem_type == -1)
+      if (mem_type == -1)
          fail("failed to choose memory tyoe\n");
 
       VkMemoryAllocateInfo mem_info = {
@@ -875,14 +1024,24 @@ init_kms(struct vkcube *vc)
       if (result != VK_SUCCESS)
          fail("vkBindImageMemory failed\n");
       close(fd);
+      if (is_linear) {
+         uint32_t bo_handles[4] = { gbm_bo_get_handle(b->gbm_bo).s32, };
+         uint32_t pitches[4] = { stride, };
+         uint32_t offsets[4] = { offset, };
+         ret = drmModeAddFB2(vc->fd, vc->width, vc->height,
+                             DRM_FORMAT_XRGB8888, bo_handles,
+                             pitches, offsets, &b->fb, 0);
+      } else {
+         uint32_t bo_handles[4] = { gbm_bo_get_handle_for_plane(b->gbm_bo, 0).s32,gbm_bo_get_handle_for_plane(b->gbm_bo, 1).s32, };
+         uint32_t pitches[4] = { gbm_bo_get_stride_for_plane(b->gbm_bo, 0), gbm_bo_get_stride_for_plane(b->gbm_bo, 1), };
+         uint32_t offsets[4] = { gbm_bo_get_offset(b->gbm_bo,0), gbm_bo_get_offset(b->gbm_bo,1), };
+         uint64_t drm_modifiers[4] = { drm_modifier, drm_modifier, };
+         ret = drmModeAddFB2WithModifiers(vc->fd, vc->width, vc->height,
+                                          DRM_FORMAT_XRGB8888, bo_handles,
+                                          pitches, offsets, drm_modifiers,
+					  &b->fb, DRM_MODE_FB_MODIFIERS);
 
-      b->stride = gbm_bo_get_stride(b->gbm_bo);
-      uint32_t bo_handles[4] = { gbm_bo_get_handle(b->gbm_bo).s32, };
-      uint32_t pitches[4] = { stride, };
-      uint32_t offsets[4] = { offset, };
-      ret = drmModeAddFB2(vc->fd, vc->width, vc->height,
-                          DRM_FORMAT_XRGB8888, bo_handles,
-                          pitches, offsets, &b->fb, 0);
+      }
       fail_if(ret == -1, "addfb2 failed\n");
 
       init_buffer(vc, b);
@@ -1905,6 +2064,10 @@ print_usage(FILE *f)
       "                          Default is \"./cube.png\".\n"
       "\n"
       "  -p                      Require protected content.\n"
+      "\n"
+      "  -M <drm modifier>       Specify DRM formatn modifier\n"
+      "                          Accepts a predefined name.\n"
+      "                          Default is DRM_FORMAT_MOD_LINEAR\n"    
       ;
 
    fprintf(f, "%s", usage);
@@ -1935,7 +2098,7 @@ parse_args(int argc, char *argv[])
     * The initial ':' in the optstring makes getopt return ':' when an option
     * is missing a required argument.
     */
-   static const char *optstring = "+:nm:w:h:o:k:p";
+   static const char *optstring = "+:nm:w:h:o:k:pM:";
 
    int opt;
    bool found_arg_headless = false;
@@ -1977,6 +2140,9 @@ parse_args(int argc, char *argv[])
       case 'p':
          require_protected = true;
          break;
+      case 'M':
+         drm_modifier = lookup_drm_modifier(optarg);
+	 break;
       case '?':
          usage_error("invalid option '-%c'", optopt);
          break;
